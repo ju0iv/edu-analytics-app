@@ -3,5 +3,3 @@ pandas
 numpy
 scikit-learn
 plotly
-gspread
-streamlit-gsheets
