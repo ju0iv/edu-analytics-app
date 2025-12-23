@@ -12,20 +12,19 @@ from gspread_dataframe import set_with_dataframe # DataFrame을 Sheet에 쓰기 
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1Cj4pLDORD_mJJzvb8xxXW2kAAaC7S9O6xcTEuYlWcVo/edit?usp=sharing"
 WORKSHEET_NAME = "Sheet1" # 데이터를 저장할 시트 이름
 
-# --- Google Sheets 연결 함수 ---
-@st.cache_resource(ttl=3600) # 한 시간 동안 클라이언트 캐시 유지
+# --- Google Sheets 연결 함수 (수정) ---
+@st.cache_resource(ttl=3600) 
 def get_sheets_client():
     try:
-        # Streamlit Secrets에 저장된 서비스 계정 JSON 키를 사용하여 연결
-        # Secrets에 "gcp_service_account" 키가 등록되어 있어야 합니다.
-        gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
+        # st.secrets에서 gsheets 인증 정보를 사용하여 연결 (JSON 키 대신 토큰 사용)
+        gc = gspread.service_account_from_dataframe(st.secrets["gsheets"]) # 토큰 기반 인증
         ss = gc.open_by_url(SHEET_URL)
         return ss
     except Exception as e:
-        # st.secrets에 키가 없거나 연결에 문제가 있을 경우
-        st.error(f"⚠️ Google Sheets 연결 오류: Secrets 설정 및 시트 권한(편집자)을 확인하세요.")
-        st.caption("앱이 작동하려면 Streamlit Secrets에 'gcp_service_account' 키 등록 및 Sheet 공유가 필요합니다.")
+        st.error(f"⚠️ Google Sheets 연결 오류: Secrets 설정 및 시트 권한(편집자)을 확인하세요. 오류: {e}")
+        st.caption("gsheets 섹션에 토큰이 등록되어 있는지 확인해 주세요.")
         return None
+# ... (load_data_from_sheets, save_uploaded_data_to_sheets 함수 내의 나머지 로직은 대부분 동일)
 
 # --- 1. 데이터 로드 엔진 (Google Sheets에서 데이터 읽기) ---
 @st.cache_data(ttl=60) # 1분마다 새로 불러옴 (데이터 변경 시 즉각 반영)
