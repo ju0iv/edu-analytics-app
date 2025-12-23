@@ -5,40 +5,17 @@ import plotly.express as px
 from sklearn.cluster import KMeans
 from datetime import datetime, timedelta
 import time
-import gspread # Google Sheets 연동을 위한 라이브러리
-from gspread_dataframe import set_with_dataframe # DataFrame을 Sheet에 쓰기 위한 라이브러리
 
-# --- Google Sheets 설정 (선생님이 제공한 URL) ---
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1Cj4pLDORD_mJJzvb8xxXW2kAAaC7S9O6xcTEuYlWcVo/edit?usp=sharing"
-WORKSHEET_NAME = "Sheet1" # 데이터를 저장할 시트 이름
-
-# --- Google Sheets 연결 함수 (수정) ---
-@st.cache_resource(ttl=3600) 
-def get_sheets_client():
+# --- 1. 데이터 로드 엔진 (CSV 파일에서 데이터 읽기) ---
+# 세션 상태에 데이터를 저장하여 페이지 새로고침 시 데이터 유지
+def load_data_from_csv(uploaded_file):
     try:
-        # st.secrets에서 gsheets 인증 정보를 사용하여 연결 (JSON 키 대신 토큰 사용)
-        gc = gspread.service_account_from_dataframe(st.secrets["gsheets"]) # 토큰 기반 인증
-        ss = gc.open_by_url(SHEET_URL)
-        return ss
-    except Exception as e:
-        st.error(f"⚠️ Google Sheets 연결 오류: Secrets 설정 및 시트 권한(편집자)을 확인하세요. 오류: {e}")
-        st.caption("gsheets 섹션에 토큰이 등록되어 있는지 확인해 주세요.")
-        return None
-# ... (load_data_from_sheets, save_uploaded_data_to_sheets 함수 내의 나머지 로직은 대부분 동일)
-
-# --- 1. 데이터 로드 엔진 (Google Sheets에서 데이터 읽기) ---
-@st.cache_data(ttl=60) # 1분마다 새로 불러옴 (데이터 변경 시 즉각 반영)
-def load_data_from_sheets(ss):
-    if ss is None:
-        return pd.DataFrame() 
-    
-    try:
-        # 지정된 시트에서 모든 데이터를 읽어옵니다.
-        worksheet = ss.worksheet(WORKSHEET_NAME)
-        df = pd.DataFrame(worksheet.get_all_records())
+        df = pd.read_csv(uploaded_file)
         
-        if df.empty or 'Student_ID' not in df.columns:
-            st.warning(f"Google Sheets '{WORKSHEET_NAME}'에 분석 데이터가 없습니다. CSV를 업로드해주세요.")
+        # 필수 컬럼 확인
+        required_cols = ['Student_ID', 'Deadline', 'Submitted_At', 'Score']
+        if not all(col in df.columns for col in required_cols):
+            st.error("업로드된 CSV 파일에 필수 컬럼(Student_ID, Deadline, Submitted_At, Score)이 모두 포함되어야 합니다.")
             return pd.DataFrame()
 
         # 데이터 형식 변환: 날짜/시간 및 점수 (오류가 나면 미제출/0점으로 처리)
@@ -46,43 +23,12 @@ def load_data_from_sheets(ss):
         df['Submitted_At'] = pd.to_datetime(df['Submitted_At'], errors='coerce')
         df['Score'] = pd.to_numeric(df['Score'], errors='coerce').fillna(0)
         
+        # Deadline이 없는 행은 분석에서 제외
         return df.dropna(subset=['Deadline'])
         
     except Exception as e:
-        st.error(f"Google Sheets 데이터 읽기 오류: 시트 이름 또는 권한을 확인하세요.")
+        st.error(f"CSV 파일 처리 중 오류 발생: {e}")
         return pd.DataFrame()
-
-# --- 1-1. CSV 업로드 시 Google Sheets에 데이터 저장 ---
-def save_uploaded_data_to_sheets(uploaded_file, ss):
-    if ss is None:
-        return False
-        
-    try:
-        df_new = pd.read_csv(uploaded_file)
-        
-        # 필수 컬럼 확인
-        required_cols = ['Student_ID', 'Deadline', 'Submitted_At', 'Score']
-        if not all(col in df_new.columns for col in required_cols):
-            st.error("업로드된 CSV 파일에 필수 컬럼(Student_ID, Deadline, Submitted_At, Score)이 모두 포함되어야 합니다.")
-            return False
-
-        # 데이터 정리 및 형식 맞추기
-        df_new['Deadline'] = pd.to_datetime(df_new['Deadline'], errors='coerce')
-        df_new['Submitted_At'] = pd.to_datetime(df_new['Submitted_At'], errors='coerce')
-        df_new['Score'] = pd.to_numeric(df_new['Score'], errors='coerce').fillna(0)
-
-        # Sheets에 쓰기 (기존 내용 덮어쓰기)
-        worksheet = ss.worksheet(WORKSHEET_NAME)
-        worksheet.clear() 
-        set_with_dataframe(worksheet, df_new)
-        
-        st.success(f"✅ 새 데이터가 Google Sheets '{WORKSHEET_NAME}'에 영구 저장되었습니다!")
-        st.cache_data.clear() # 캐시를 지워 새 데이터를 즉시 로드
-        return True
-    
-    except Exception as e:
-        st.error(f"데이터를 Google Sheets에 저장하는 중 오류 발생: {e}")
-        return False
 
 
 # --- 2. 머신러닝 분석 엔진 (K-Means Clustering) ---
@@ -91,18 +37,19 @@ def run_ml_analysis(df):
     if df.empty:
         return pd.DataFrame()
         
-    # 학생별 요약 데이터 생성 (기존 로직 유지)
+    # 학생별 요약 데이터 생성
     summary = []
     for sid, group in df.groupby('Student_ID'):
-        total = len(group)
         missing = group['Submitted_At'].isnull().sum()
         valid = group.dropna(subset=['Submitted_At']).copy()
         
         if len(valid) > 0:
+            # 제출 시간 계산 (시간 단위)
             valid['time_diff_hours'] = (valid['Submitted_At'] - valid['Deadline']).dt.total_seconds() / 3600
             avg_lateness = valid['time_diff_hours'].mean() 
             avg_score = valid['Score'].mean()
         else:
+            # 미제출만 있는 경우 최악의 값 부여
             avg_lateness = 100 
             avg_score = 0
             
@@ -112,7 +59,9 @@ def run_ml_analysis(df):
     
     # ML 모델 학습 (4개 그룹으로 자동 분류)
     X = df_features[['Avg_Score', 'Avg_Lateness', 'Missing_Count']].copy()
+    # 지각 시간이 너무 커지는 것을 방지하기 위해 클리핑 (예: 1주일 내로 제한)
     X['Avg_Lateness'] = np.clip(X['Avg_Lateness'], -24 * 7, 24 * 7) 
+    # 결측 개수를 점수에 비례하게 스케일링하여 클러스터링에 반영
     X['Missing_Count_Scaled'] = X['Missing_Count'] * 15 
 
     kmeans = KMeans(n_clusters=4, random_state=42, n_init=10) 
@@ -134,39 +83,41 @@ st.set_page_config(page_title="Edu-Analytics Pro", layout="wide")
 st.title("🎓 AI 학습 관리 매니저 (Edu-Analytics Pro)")
 st.markdown("학생들의 패턴을 머신러닝으로 분석하고, 맞춤형 알림을 보냅니다.")
 
-# --- 데이터 처리 메인 로직 ---
-ss = get_sheets_client() # Google Sheets 클라이언트 연결
-df_raw = load_data_from_sheets(ss) # Sheets에서 데이터 로드 시도
+# 세션 상태 초기화 (데이터가 없는 경우)
+if 'df_raw' not in st.session_state:
+    st.session_state['df_raw'] = pd.DataFrame()
 
 # 사이드바
 st.sidebar.header("관리자 패널")
-
-# CSV 업로드 처리: 업로드 시 Sheets에 영구 저장
 uploaded_file = st.sidebar.file_uploader("과제 데이터 업로드 (CSV)", type="csv")
+
+# CSV 업로드 처리
 if uploaded_file is not None:
-    if save_uploaded_data_to_sheets(uploaded_file, ss):
-        st.rerun() # 저장 성공 시 재실행하여 새 데이터로 대시보드 갱신
+    st.session_state['df_raw'] = load_data_from_csv(uploaded_file)
+    st.sidebar.success("✅ CSV 파일 업로드 및 데이터 로드 완료.")
+    uploaded_file = None # 파일을 처리했으니 초기화하여 재업로드 방지 (UX 개선)
+
+df_raw = st.session_state['df_raw']
 
 # 데이터 로드 상태 확인 및 분석 실행
 if df_raw.empty:
-    st.info("CSV 파일을 업로드하면, 해당 데이터가 Google Sheets에 저장되고 앱이 분석을 시작합니다.")
-    if ss is not None:
-         st.caption(f"현재 Google Sheets '{WORKSHEET_NAME}'에서 데이터를 기다리는 중입니다.")
-    st.stop() # 데이터가 없으면 앱 실행 중지
+    st.info("앱을 사용하려면 CSV 파일을 업로드해야 합니다.")
+    st.caption("데이터는 페이지를 닫거나 앱이 재시작되면 사라집니다. (영구 저장 기능 제거됨)")
+    st.stop()
     
 # 데이터 분석 실행
 df_analyzed = run_ml_analysis(df_raw)
 
-# --- 메인 대시보드 UI (기존 로직 유지) ---
-st.header("현재 분석 데이터 (Google Sheets에서 불러옴)")
+# --- 메인 대시보드 UI ---
+st.header("현재 분석 데이터")
 
 # 상단 KPI 지표
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("총 수강생", f"{len(df_analyzed)}명")
-col2.metric("위험군(Dropout Risk)", f"{len(df_analyzed[df_analyzed['Persona'].str.contains('위험')])}명", delta="-2명", delta_color="inverse")
+col2.metric("위험군(Dropout Risk)", f"{len(df_analyzed[df_analyzed['Persona'].str.contains('위험')])}명")
 col3.metric("평균 점수", f"{df_analyzed['Avg_Score'].mean():.1f}점")
 
-# 평균 제출 시간을 계산하여 표시
+# 평균 제출 시간 계산하여 표시
 avg_lateness_sec = (df_raw['Submitted_At'] - df_raw['Deadline']).dt.total_seconds().mean()
 if avg_lateness_sec < 0:
     time_delta = timedelta(seconds=abs(avg_lateness_sec))
