@@ -37,7 +37,7 @@ def run_ml_analysis(df):
     if df.empty:
         return pd.DataFrame()
         
-    # 학생별 요약 데이터 생성
+    # 학생별 요약 데이터 생성 (기존 로직 유지)
     summary = []
     for sid, group in df.groupby('Student_ID'):
         missing = group['Submitted_At'].isnull().sum()
@@ -57,25 +57,43 @@ def run_ml_analysis(df):
     
     df_features = pd.DataFrame(summary, columns=['Student_ID', 'Avg_Score', 'Avg_Lateness', 'Missing_Count'])
     
-    # ML 모델 학습 (4개 그룹으로 자동 분류)
+    # ML 모델 학습 (4개 그룹으로 자동 분류) - (기존 로직 유지)
     X = df_features[['Avg_Score', 'Avg_Lateness', 'Missing_Count']].copy()
-    # 지각 시간이 너무 커지는 것을 방지하기 위해 클리핑 (예: 1주일 내로 제한)
     X['Avg_Lateness'] = np.clip(X['Avg_Lateness'], -24 * 7, 24 * 7) 
-    # 결측 개수를 점수에 비례하게 스케일링하여 클러스터링에 반영
     X['Missing_Count_Scaled'] = X['Missing_Count'] * 15 
 
     kmeans = KMeans(n_clusters=4, random_state=42, n_init=10) 
     df_features['Cluster'] = kmeans.fit_predict(X[['Avg_Score', 'Avg_Lateness', 'Missing_Count_Scaled']])
     
-    # 클러스터 특성에 따라 이름 부여 
+    # **[여기부터 수정 시작]**
+    # 클러스터 특성에 따라 이름 부여 (현실적인 조건으로 수정)
+    
+    # 클러스터의 평균 특성을 계산하여 라벨링 조건의 기준점으로 사용 (옵션: 실제 클러스터 중심 사용)
+    cluster_means = df_features.groupby('Cluster')[['Avg_Lateness', 'Missing_Count', 'Avg_Score']].mean()
+    
+    # 단순한 if-else 조건으로 4개 유형 강제 분류
+    # 참고: 현재 데이터가 단일 과제라면 Missing_Count는 최대 1이므로, 이 기준으로 위험군을 나눕니다.
+
     def label_cluster(row):
-        if row['Missing_Count'] >= 2: return "🚨 중도포기 위험군"
-        if row['Avg_Lateness'] > 0: return "⚠️ 습관적 지각생"
-        if row['Avg_Lateness'] > -5 and row['Avg_Lateness'] <= 0: return "⚡ 벼락치기형"
-        return "✅ 성실 우수생"
+        # 1. 🚨 중도포기 위험군 (미제출이 1개라도 있거나, 점수가 매우 낮은 경우)
+        if row['Missing_Count'] >= 1 and row['Avg_Score'] < 50: 
+             return "🚨 중도포기 위험군"
+        
+        # 2. ⚠️ 습관적 지각생 (평균 지각 시간이 1시간 이상)
+        if row['Avg_Lateness'] > 1: 
+             return "⚠️ 습관적 지각생"
+        
+        # 3. ✅ 성실 우수생 (마감 3시간 이상 전에 제출한 경우)
+        if row['Avg_Lateness'] <= -3: 
+             return "✅ 성실 우수생"
+             
+        # 4. ⚡ 벼락치기형 (나머지, 마감 3시간 전 ~ 1시간 지각 사이의 학생)
+        # 이 조건이 가장 넓은 범위의 학생을 포함합니다.
+        return "⚡ 벼락치기형" 
 
     df_features['Persona'] = df_features.apply(label_cluster, axis=1)
     return df_features
+# **[여기까지 수정]**
 
 # --- 3. UI 및 시각화 (Streamlit) ---
 st.set_page_config(page_title="Edu-Analytics Pro", layout="wide")
